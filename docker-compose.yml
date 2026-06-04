@@ -1,0 +1,226 @@
+# ============================================================
+# NARAYANA HEALTH — NH Website Full Stack Docker Compose
+# Services: Strapi CMS, PostgreSQL, OpenSearch, Redis, Kafka
+# ============================================================
+
+version: '3.9'
+
+services:
+
+  # ── PostgreSQL (Strapi database) ──────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: nh_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${STRAPI_DB_NAME:-nh_strapi}
+      POSTGRES_USER: ${STRAPI_DB_USER:-nh_admin}
+      POSTGRES_PASSWORD: ${STRAPI_DB_PASSWORD:-nh_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${STRAPI_DB_USER:-nh_admin} -d ${STRAPI_DB_NAME:-nh_strapi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nh_network
+
+  # ── Strapi CMS ────────────────────────────────────────────
+  strapi:
+    image: node:20-alpine
+    container_name: nh_strapi
+    restart: unless-stopped
+    working_dir: /srv/app
+    command: sh -c "npm install && npm run develop"
+    environment:
+      DATABASE_CLIENT: postgres
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: ${STRAPI_DB_NAME:-nh_strapi}
+      DATABASE_USERNAME: ${STRAPI_DB_USER:-nh_admin}
+      DATABASE_PASSWORD: ${STRAPI_DB_PASSWORD:-nh_secret}
+      DATABASE_SSL: "false"
+      JWT_SECRET: ${STRAPI_JWT_SECRET:-nh-strapi-jwt-secret-change-in-prod}
+      ADMIN_JWT_SECRET: ${STRAPI_ADMIN_JWT_SECRET:-nh-admin-jwt-secret-change-in-prod}
+      APP_KEYS: ${STRAPI_APP_KEYS:-key1,key2,key3,key4}
+      API_TOKEN_SALT: ${STRAPI_API_TOKEN_SALT:-nh-api-token-salt}
+      TRANSFER_TOKEN_SALT: ${STRAPI_TRANSFER_TOKEN_SALT:-nh-transfer-salt}
+      NODE_ENV: ${NODE_ENV:-development}
+      HOST: 0.0.0.0
+      PORT: 1337
+    volumes:
+      - ./strapi:/srv/app
+      - strapi_uploads:/srv/app/public/uploads
+    ports:
+      - "1337:1337"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - nh_network
+
+  # ── OpenSearch ────────────────────────────────────────────
+  opensearch:
+    image: opensearchproject/opensearch:2.13.0
+    container_name: nh_opensearch
+    restart: unless-stopped
+    environment:
+      cluster.name: nh-search-cluster
+      node.name: nh-node-01
+      discovery.type: single-node
+      OPENSEARCH_JAVA_OPTS: "-Xms512m -Xmx512m"
+      DISABLE_SECURITY_PLUGIN: "true"
+      DISABLE_INSTALL_DEMO_CONFIG: "true"
+    volumes:
+      - opensearch_data:/usr/share/opensearch/data
+    ports:
+      - "9200:9200"
+      - "9600:9600"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    networks:
+      - nh_network
+
+  # ── OpenSearch Dashboards (dev only) ─────────────────────
+  opensearch-dashboards:
+    image: opensearchproject/opensearch-dashboards:2.13.0
+    container_name: nh_opensearch_dashboards
+    restart: unless-stopped
+    environment:
+      OPENSEARCH_HOSTS: '["http://opensearch:9200"]'
+      DISABLE_SECURITY_DASHBOARDS_PLUGIN: "true"
+    ports:
+      - "5601:5601"
+    depends_on:
+      opensearch:
+        condition: service_healthy
+    networks:
+      - nh_network
+    profiles:
+      - dev-tools
+
+  # ── Redis ─────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: nh_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nh_network
+
+  # ── Zookeeper (for Kafka) ─────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: nh_zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_logs:/var/lib/zookeeper/log
+    ports:
+      - "2181:2181"
+    networks:
+      - nh_network
+    profiles:
+      - events
+
+  # ── Kafka ─────────────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: nh_kafka
+    restart: unless-stopped
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+    networks:
+      - nh_network
+    profiles:
+      - events
+
+  # ── Kafka UI (dev only) ───────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: nh_kafka_ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: nh-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    ports:
+      - "8080:8080"
+    depends_on:
+      - kafka
+    networks:
+      - nh_network
+    profiles:
+      - dev-tools
+      - events
+
+  # ── Spring Boot API (mock / local build) ──────────────────
+  # Uncomment when the Spring Boot JAR is available
+  # spring-api:
+  #   build: ./spring-api
+  #   container_name: nh_spring_api
+  #   restart: unless-stopped
+  #   environment:
+  #     SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${STRAPI_DB_NAME}
+  #     OPENSEARCH_URL: http://opensearch:9200
+  #     REDIS_HOST: redis
+  #     KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+  #   ports:
+  #     - "8090:8090"
+  #   depends_on:
+  #     - postgres
+  #     - opensearch
+  #     - redis
+  #   networks:
+  #     - nh_network
+
+# ── Named Volumes ─────────────────────────────────────────
+volumes:
+  postgres_data:
+  strapi_uploads:
+  opensearch_data:
+  redis_data:
+  zookeeper_data:
+  zookeeper_logs:
+  kafka_data:
+
+# ── Networks ──────────────────────────────────────────────
+networks:
+  nh_network:
+    driver: bridge
