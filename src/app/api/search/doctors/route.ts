@@ -10,7 +10,7 @@ import { NHAPIError } from '@/lib/types';
 const SPRING_API_URL = process.env.SPRING_API_URL;
 const SPRING_API_KEY = process.env.SPRING_API_KEY;
 
-export const runtime = 'edge';
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
